@@ -213,6 +213,7 @@ const app = new Elysia()
       "scope",
       "playlist-read-private playlist-read-collaborative",
     );
+    authUrl.searchParams.set("show_dialog", "true");
     return Response.redirect(authUrl.toString(), 302);
   })
 
@@ -245,12 +246,25 @@ const app = new Elysia()
     const data = await response.json();
 
     if (!response.ok) {
-      return new Response(JSON.stringify(data, null, 2), {
+      return new Response(
+        JSON.stringify(
+          {
+            message: "O Spotify bloqueou o acesso a esta playlist.",
+            playlistId,
+            spotifyStatus: response.status,
+            spotifyError: data,
+            hint: "Refaca o login em /login para garantir que o token tem playlist-read-private e playlist-read-collaborative.",
+          },
+          null,
+          2,
+        ),
+        {
         status: response.status,
         headers: {
           "Content-Type": "application/json",
         },
-      });
+        },
+      );
     }
 
     spotifyAccessToken = data.access_token;
