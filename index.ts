@@ -2,6 +2,7 @@ import { Elysia } from "elysia";
 import "dotenv/config";
 
 let spotifyAccessToken: string | null = null;
+let spotifyTokenScope: string | null = null;
 let youtubeAccessToken: string | null = null;
 
 type SpotifyTrack = {
@@ -10,6 +11,29 @@ type SpotifyTrack = {
   album: string | null;
   spotifyUrl: string | null;
 };
+
+type SpotifyPlaylistSummary = {
+  id: string;
+  name: string;
+  owner: string | null;
+  ownerId: string | null;
+  isPublic: boolean | null;
+  isCollaborative: boolean;
+  totalTracks: number;
+  tracksHref: string | null;
+  spotifyUrl: string | null;
+};
+
+function normalizeSpotifyPlaylistItem(item: any): SpotifyTrack {
+  const track = item.track ?? item.item;
+
+  return {
+    songName: track?.name ?? null,
+    artists: track?.artists?.map((artist: any) => artist.name) ?? [],
+    album: track?.album?.name ?? null,
+    spotifyUrl: track?.external_urls?.spotify ?? null,
+  };
+}
 
 function getSpotifyPlaylistId(input: string) {
   const trimmedInput = input.trim();
@@ -58,7 +82,30 @@ async function fetchSpotifyPlaylistTracks(playlistId: string) {
   }
 
   const tracks: SpotifyTrack[] = [];
-  let nextUrl = `https://api.spotify.com/v1/playlists/${encodeURIComponent(playlistId)}/tracks`;
+  const playlistResponse = await fetch(
+    `https://api.spotify.com/v1/playlists/${encodeURIComponent(playlistId)}`,
+    {
+      headers: {
+        Authorization: `Bearer ${spotifyAccessToken}`,
+      },
+    },
+  );
+
+  const playlistData = await playlistResponse.json();
+
+  if (!playlistResponse.ok) {
+    throw new Error(JSON.stringify(playlistData));
+  }
+
+  const firstPage = playlistData.items;
+
+  if (!firstPage?.items?.length) {
+    return tracks;
+  }
+
+  tracks.push(...firstPage.items.map(normalizeSpotifyPlaylistItem));
+
+  let nextUrl = firstPage.next;
 
   while (nextUrl) {
     const response = await fetch(nextUrl, {
@@ -73,12 +120,7 @@ async function fetchSpotifyPlaylistTracks(playlistId: string) {
       throw new Error(JSON.stringify(data));
     }
 
-    const pageTracks = data.items.map((item: any) => ({
-      songName: item.track?.name ?? null,
-      artists: item.track?.artists?.map((artist: any) => artist.name) ?? [],
-      album: item.track?.album?.name ?? null,
-      spotifyUrl: item.track?.external_urls?.spotify ?? null,
-    }));
+    const pageTracks = data.items.map(normalizeSpotifyPlaylistItem);
 
     tracks.push(...pageTracks);
     nextUrl = data.next;
@@ -87,10 +129,90 @@ async function fetchSpotifyPlaylistTracks(playlistId: string) {
   return tracks;
 }
 
+async function fetchCurrentUserSpotifyPlaylists() {
+  if (!spotifyAccessToken) {
+    throw new Error("Voce ainda nao fez login no Spotify. Abra /login primeiro.");
+  }
+
+  const playlists: SpotifyPlaylistSummary[] = [];
+  let nextUrl = "https://api.spotify.com/v1/me/playlists?limit=50";
+
+  while (nextUrl) {
+    const response = await fetch(nextUrl, {
+      headers: {
+        Authorization: `Bearer ${spotifyAccessToken}`,
+      },
+    });
+
+    const data = await response.json();
+
+    if (!response.ok) {
+      throw new Error(JSON.stringify(data));
+    }
+
+    const pagePlaylists = data.items.map((playlist: any) => ({
+      id: playlist.id,
+      name: playlist.name,
+      owner: playlist.owner?.display_name ?? null,
+      ownerId: playlist.owner?.id ?? null,
+      isPublic: playlist.public,
+      isCollaborative: playlist.collaborative,
+      totalTracks: playlist.tracks?.total ?? playlist.items?.total ?? 0,
+      tracksHref: playlist.tracks?.href ?? playlist.items?.href ?? null,
+      spotifyUrl: playlist.external_urls?.spotify ?? null,
+    }));
+
+    playlists.push(...pagePlaylists);
+    nextUrl = data.next;
+  }
+
+  return playlists;
+}
+
 function buildYoutubeSearchQuery(track: SpotifyTrack) {
   return [track.songName, ...track.artists, "official audio"]
     .filter(Boolean)
     .join(" ");
+}
+
+function sleep(ms: number) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function isRetryableYoutubeError(status: number, data: any) {
+  const reason = data?.error?.errors?.[0]?.reason;
+  const apiStatus = data?.error?.status;
+
+  return (
+    status === 409 ||
+    status === 429 ||
+    status >= 500 ||
+    reason === "SERVICE_UNAVAILABLE" ||
+    apiStatus === "ABORTED"
+  );
+}
+
+async function fetchYoutubeWithRetry(url: string, options: RequestInit) {
+  const maxAttempts = 4;
+
+  for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+    const response = await fetch(url, options);
+    const data = await response.json();
+
+    if (response.ok) {
+      return data;
+    }
+
+    const shouldRetry = isRetryableYoutubeError(response.status, data);
+
+    if (!shouldRetry || attempt === maxAttempts) {
+      throw new Error(JSON.stringify(data));
+    }
+
+    await sleep(1000 * attempt);
+  }
+
+  throw new Error("A chamada para o YouTube falhou apos varias tentativas.");
 }
 
 async function searchYoutubeVideo(query: string) {
@@ -106,17 +228,11 @@ async function searchYoutubeVideo(query: string) {
   searchUrl.searchParams.set("maxResults", "1");
   searchUrl.searchParams.set("q", query);
 
-  const response = await fetch(searchUrl.toString(), {
+  const data = await fetchYoutubeWithRetry(searchUrl.toString(), {
     headers: {
       Authorization: `Bearer ${youtubeAccessToken}`,
     },
   });
-
-  const data = await response.json();
-
-  if (!response.ok) {
-    throw new Error(JSON.stringify(data));
-  }
 
   const firstItem = data.items?.[0];
 
@@ -138,7 +254,7 @@ async function createYoutubePlaylist(title: string, description: string) {
     );
   }
 
-  const response = await fetch(
+  return await fetchYoutubeWithRetry(
     "https://www.googleapis.com/youtube/v3/playlists?part=snippet,status",
     {
       method: "POST",
@@ -157,14 +273,6 @@ async function createYoutubePlaylist(title: string, description: string) {
       }),
     },
   );
-
-  const data = await response.json();
-
-  if (!response.ok) {
-    throw new Error(JSON.stringify(data));
-  }
-
-  return data;
 }
 
 async function addVideoToYoutubePlaylist(playlistId: string, videoId: string) {
@@ -174,7 +282,7 @@ async function addVideoToYoutubePlaylist(playlistId: string, videoId: string) {
     );
   }
 
-  const response = await fetch(
+  return await fetchYoutubeWithRetry(
     "https://www.googleapis.com/youtube/v3/playlistItems?part=snippet",
     {
       method: "POST",
@@ -193,14 +301,6 @@ async function addVideoToYoutubePlaylist(playlistId: string, videoId: string) {
       }),
     },
   );
-
-  const data = await response.json();
-
-  if (!response.ok) {
-    throw new Error(JSON.stringify(data));
-  }
-
-  return data;
 }
 
 const app = new Elysia()
@@ -249,11 +349,9 @@ const app = new Elysia()
       return new Response(
         JSON.stringify(
           {
-            message: "O Spotify bloqueou o acesso a esta playlist.",
-            playlistId,
+            message: "O Spotify nao aceitou trocar o code por token.",
             spotifyStatus: response.status,
             spotifyError: data,
-            hint: "Refaca o login em /login para garantir que o token tem playlist-read-private e playlist-read-collaborative.",
           },
           null,
           2,
@@ -268,9 +366,11 @@ const app = new Elysia()
     }
 
     spotifyAccessToken = data.access_token;
+    spotifyTokenScope = data.scope ?? null;
 
     return {
       message: "Login com Spotify concluido com sucesso.",
+      scope: spotifyTokenScope,
       nextSteps: [
         "Abra /me para testar se o token representa voce.",
         "Abra /search?q=Daft Punk para testar uma busca usando o token do usuario.",
@@ -368,6 +468,72 @@ const app = new Elysia()
     });
   })
 
+  .get("/spotify/auth-info", () => {
+    return {
+      hasAccessToken: Boolean(spotifyAccessToken),
+      scope: spotifyTokenScope,
+      redirectUri: process.env.SPOTIFY_REDIRECT_URI,
+    };
+  })
+
+  .get("/spotify/playlist-debug", async ({ query }) => {
+    const playlistInput = query.id;
+
+    if (!spotifyAccessToken) {
+      return new Response("Voce ainda nao fez login. Abra /login primeiro.", {
+        status: 401,
+      });
+    }
+
+    if (!playlistInput) {
+      return new Response(
+        "Informe o id ou a URL da playlist. Exemplo: /spotify/playlist-debug?id=SEU_ID_DA_PLAYLIST.",
+        { status: 400 },
+      );
+    }
+
+    const playlistId = getSpotifyPlaylistId(playlistInput);
+    const userPlaylists = await fetchCurrentUserSpotifyPlaylists();
+    const playlistFromAccount = userPlaylists.find(
+      (playlist) => playlist.id === playlistId,
+    );
+
+    const playlistResponse = await fetch(
+      `https://api.spotify.com/v1/playlists/${encodeURIComponent(playlistId)}`,
+      {
+        headers: {
+          Authorization: `Bearer ${spotifyAccessToken}`,
+        },
+      },
+    );
+    const playlistData = await playlistResponse.json();
+
+    const tracksResponse = await fetch(
+      `https://api.spotify.com/v1/playlists/${encodeURIComponent(playlistId)}/tracks?limit=10`,
+      {
+        headers: {
+          Authorization: `Bearer ${spotifyAccessToken}`,
+        },
+      },
+    );
+    const tracksData = await tracksResponse.json();
+
+    return {
+      playlistId,
+      tokenScope: spotifyTokenScope,
+      foundInYourPlaylists: Boolean(playlistFromAccount),
+      playlistFromAccount,
+      fullPlaylistEndpoint: {
+        status: playlistResponse.status,
+        data: playlistData,
+      },
+      tracksEndpoint: {
+        status: tracksResponse.status,
+        data: tracksData,
+      },
+    };
+  })
+
   .get("/playlist", async ({ query }) => {
     const playlistInput = query.id;
 
@@ -386,38 +552,34 @@ const app = new Elysia()
 
     const playlistId = getSpotifyPlaylistId(playlistInput);
 
-    const response = await fetch(
-      `https://api.spotify.com/v1/playlists/${encodeURIComponent(playlistId)}/tracks`,
-      {
-        headers: {
-          Authorization: `Bearer ${spotifyAccessToken}`,
-        },
-      },
-    );
+    try {
+      const tracks = await fetchSpotifyPlaylistTracks(playlistId);
 
-    const data = await response.json();
-
-    if (!response.ok) {
-      return new Response(JSON.stringify(data, null, 2), {
-        status: response.status,
-        headers: {
-          "Content-Type": "application/json",
+      return {
+        playlistId,
+        totalTracks: tracks.length,
+        tracks,
+      };
+    } catch (error) {
+      return new Response(
+        JSON.stringify(
+          {
+            message: "Nao consegui buscar as faixas dessa playlist.",
+            playlistId,
+            tokenScope: spotifyTokenScope,
+            error: String(error),
+          },
+          null,
+          2,
+        ),
+        {
+          status: 400,
+          headers: {
+            "Content-Type": "application/json",
+          },
         },
-      });
+      );
     }
-
-    const tracks = data.items.map((item: any) => ({
-      songName: item.track?.name,
-      artists: item.track?.artists?.map((artist: any) => artist.name) || [],
-      album: item.track?.album?.name,
-      spotifyUrl: item.track?.external_urls?.spotify,
-    }));
-
-    return {
-      playlistId,
-      totalTracks: data.total,
-      tracks,
-    };
   })
 
   .get("/playlists", async () => {
@@ -427,34 +589,18 @@ const app = new Elysia()
       });
     }
 
-    const response = await fetch("https://api.spotify.com/v1/me/playlists", {
-      headers: {
-        Authorization: `Bearer ${spotifyAccessToken}`,
-      },
-    });
+    try {
+      const playlists = await fetchCurrentUserSpotifyPlaylists();
 
-    const data = await response.json();
-
-    if (!response.ok) {
-      return new Response(JSON.stringify(data, null, 2), {
-        status: response.status,
-        headers: {
-          "Content-Type": "application/json",
-        },
+      return {
+        total: playlists.length,
+        playlists,
+      };
+    } catch (error) {
+      return new Response(String(error), {
+        status: 400,
       });
     }
-
-    const playlists = data.items.map((playlist: any) => ({
-      id: playlist.id,
-      name: playlist.name,
-      totalTracks: playlist.tracks?.total,
-      spotifyUrl: playlist.external_urls?.spotify,
-    }));
-
-    return {
-      total: data.total,
-      playlists,
-    };
   })
 
   .get("/youtube/search", async ({ query }) => {
@@ -528,6 +674,8 @@ const app = new Elysia()
     const spotifyPlaylistId = getSpotifyPlaylistId(
       query.spotifyPlaylistId || "3cEYpjA9oz9GiPac4AsH4n",
     );
+    const transferLimit = Math.min(Number(query.limit || 10), 100);
+    const transferOffset = Math.max(Number(query.offset || 0), 0);
     const youtubePlaylistTitle =
       query.youtubePlaylistTitle ||
       `Transferida do Spotify ${spotifyPlaylistId}`;
@@ -537,6 +685,10 @@ const app = new Elysia()
 
     try {
       const spotifyTracks = await fetchSpotifyPlaylistTracks(spotifyPlaylistId);
+      const tracksToTransfer = spotifyTracks.slice(
+        transferOffset,
+        transferOffset + transferLimit,
+      );
       const youtubePlaylist = await createYoutubePlaylist(
         youtubePlaylistTitle,
         youtubePlaylistDescription,
@@ -551,29 +703,45 @@ const app = new Elysia()
         spotifySongName: string | null;
         searchQuery: string;
       }> = [];
+      const failedTracks: Array<{
+        spotifySongName: string | null;
+        searchQuery: string;
+        error: string;
+      }> = [];
 
-      for (const track of spotifyTracks) {
+      for (const track of tracksToTransfer) {
         const searchQuery = buildYoutubeSearchQuery(track);
-        const youtubeResult = await searchYoutubeVideo(searchQuery);
 
-        if (!youtubeResult?.videoId) {
-          notFoundTracks.push({
+        try {
+          const youtubeResult = await searchYoutubeVideo(searchQuery);
+
+          if (!youtubeResult?.videoId) {
+            notFoundTracks.push({
+              spotifySongName: track.songName,
+              searchQuery,
+            });
+            continue;
+          }
+
+          await addVideoToYoutubePlaylist(
+            youtubePlaylist.id,
+            youtubeResult.videoId,
+          );
+
+          addedTracks.push({
+            spotifySongName: track.songName,
+            youtubeVideoId: youtubeResult.videoId,
+            youtubeTitle: youtubeResult.title,
+          });
+        } catch (error) {
+          failedTracks.push({
             spotifySongName: track.songName,
             searchQuery,
+            error: String(error),
           });
-          continue;
         }
 
-        await addVideoToYoutubePlaylist(
-          youtubePlaylist.id,
-          youtubeResult.videoId,
-        );
-
-        addedTracks.push({
-          spotifySongName: track.songName,
-          youtubeVideoId: youtubeResult.videoId,
-          youtubeTitle: youtubeResult.title,
-        });
+        await sleep(500);
       }
 
       return {
@@ -581,10 +749,15 @@ const app = new Elysia()
         youtubePlaylistId: youtubePlaylist.id,
         youtubePlaylistTitle: youtubePlaylist.snippet?.title,
         totalSpotifyTracks: spotifyTracks.length,
+        requestedTransferOffset: transferOffset,
+        requestedTransferLimit: transferLimit,
+        processedTracks: tracksToTransfer.length,
         addedCount: addedTracks.length,
         notFoundCount: notFoundTracks.length,
+        failedCount: failedTracks.length,
         addedTracks,
         notFoundTracks,
+        failedTracks,
       };
     } catch (error) {
       return new Response(String(error), {
