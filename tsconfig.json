@@ -3,6 +3,7 @@
     "target": "ES2022",
     "module": "ESNext",
     "moduleResolution": "node",
+    "ignoreDeprecations": "6.0",
     "lib": ["ES2021", "DOM"],
     "strict": true,
     "esModuleInterop": true,
@@ -10,5 +11,5 @@
     "forceConsistentCasingInFileNames": true,
     "types": ["node"]
   },
-  "include": ["./**/*.ts"]
+  "include": ["src/**/*.ts"]
 }
