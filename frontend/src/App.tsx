@@ -130,59 +130,80 @@ function App() {
   }
 
   return (
-    <main className="app">
-      <section className="hero">
+    <main className="app-shell">
+      <section className="hero-panel">
+        <p className="eyebrow">Spotify to YouTube</p>
         <h1>Transfer Playlist</h1>
-        <p>Conecte Spotify e YouTube para transferir playlists em blocos.</p>
+        <p className="hero-copy">
+          Conecte as duas contas, escolha sua playlist e envie as faixas para o
+          YouTube com controle de offset e limite.
+        </p>
       </section>
 
-      <section className="auth-panel">
-        <button type="button" onClick={handleSpotifyLogin}>
-          Login Spotify
-        </button>
-
-        <button type="button" onClick={handleYoutubeLogin}>
-          Login YouTube
-        </button>
+      <section className="card auth-panel">
+        <h2>1. Conectar contas</h2>
+        <div className="actions-row">
+          <button type="button" onClick={handleSpotifyLogin}>
+            Login Spotify
+          </button>
+          <button type="button" onClick={handleYoutubeLogin}>
+            Login YouTube
+          </button>
+        </div>
       </section>
 
-      <section className="playlists-panel">
+      <section className="card playlists-panel">
         <div className="section-header">
-          <h2>Playlists</h2>
+          <h2>2. Escolher playlist</h2>
           <button type="button" onClick={loadPlaylists} disabled={loading}>
             {loading ? "Carregando..." : "Carregar playlists"}
           </button>
         </div>
 
-        <div className="playlist-list">
-          {playlists.map((playlist) => (
-            <article key={playlist.id} className="playlist-card">
-              <h3>{playlist.name}</h3>
-              <p>{playlist.totalTracks} musicas</p>
-              <p>
-                <code>{playlist.id}</code>
-              </p>
-
-              <button
-                type="button"
-                onClick={() => loadPlaylistTracks(playlist.id)}
-                disabled={loading}
-              >
-                Ver musicas
-              </button>
-            </article>
-          ))}
-        </div>
+        {playlists.length === 0 ? (
+          <p className="muted">Nenhuma playlist carregada ainda.</p>
+        ) : (
+          <div className="playlist-list">
+            {playlists.map((playlist) => (
+              <article key={playlist.id} className="playlist-card">
+                <h3>{playlist.name}</h3>
+                <p>{playlist.totalTracks} musicas</p>
+                <p>
+                  <code>{playlist.id}</code>
+                </p>
+                <div className="actions-row compact">
+                  <button
+                    type="button"
+                    onClick={() => loadPlaylistTracks(playlist.id)}
+                    disabled={loading}
+                  >
+                    Ver musicas
+                  </button>
+                  {playlist.spotifyUrl && (
+                    <a
+                      href={playlist.spotifyUrl}
+                      target="_blank"
+                      rel="noreferrer"
+                      className="ghost-link"
+                    >
+                      Abrir no Spotify
+                    </a>
+                  )}
+                </div>
+              </article>
+            ))}
+          </div>
+        )}
       </section>
 
-      <section className="tracks-panel">
+      <section className="card tracks-panel">
         <div className="section-header">
-          <h2>Musicas da playlist</h2>
+          <h2>3. Conferir musicas</h2>
           {selectedPlaylistId && <code>{selectedPlaylistId}</code>}
         </div>
 
         {tracks.length === 0 ? (
-          <p>Nenhuma musica carregada ainda.</p>
+          <p className="muted">Nenhuma musica carregada ainda.</p>
         ) : (
           <div className="track-list">
             {tracks.map((track, index) => (
@@ -199,8 +220,8 @@ function App() {
         )}
       </section>
 
-      <section className="transfer-panel">
-        <h2>Transferencia</h2>
+      <section className="card transfer-panel">
+        <h2>4. Transferir</h2>
 
         <div className="transfer-controls">
           <label>
